@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>NEON DODGER — built from one prompt</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #070312; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+"use strict";
+
+// NEON DODGER — built from one prompt:
+// "Build a tiny browser game: a neon dodger — steer a little ship
+//  through falling asteroids, one life, score is survival seconds."
+//
+// The whole game state is a pure function of time: a fixed seed feeds
+// every asteroid, so game.html?t=SECONDS always draws the same frame.
+
+const VW = 540, VH = 960;          // virtual playfield
+const SHIP_Y = 858;                // ship nose line
+const SHIP_R = 16;
+const SEED = 20261122;
+const STEP = 1 / 60;
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// One asteroid, fully described by the seed stream at spawn time.
+function spawnAsteroid(rng, at) {
+  const r = 15 + rng() * 19;
+  return {
+    born: at,
+    x: 30 + rng() * (VW - 60),
+    y: -50,
+    r: r,
+    vy: 215 + rng() * 150,
+    rot: rng() * Math.PI * 2,
+    spin: (rng() - 0.5) * 2.2,
+    hue: [318, 28, 265, 190][Math.floor(rng() * 4)],
+    verts: Array.from({ length: 9 }, () => 0.72 + rng() * 0.45),
+  };
+}
+
+// Deterministic autopilot: dodge the nearest rock above the ship,
+// otherwise drift back toward the middle of the sky.
+function autopilot(state, dt) {
+  let threat = null;
+  for (const a of state.rocks) {
+    const dy = SHIP_Y - a.y;
+    if (dy > 0 && dy < 330 && Math.abs(a.x - state.shipX) < 120) {
+      if (!threat || dy < SHIP_Y - threat.y) threat = a;
+    }
+  }
+  let target = VW / 2;
+  if (threat) target = state.shipX + (threat.x >= state.shipX ? -170 : 170);
+  const diff = target - state.shipX;
+  const speed = 470;
+  const move = Math.max(-speed * dt, Math.min(speed * dt, diff));
+  state.shipX = Math.max(24, Math.min(VW - 24, state.shipX + move));
+  state.vel = move / dt;
+}
+
+// Simulate from t = 0 up to t, in fixed steps. Pure function of t.
+function simulate(t) {
+  const rng = mulberry32(SEED);
+  const state = { shipX: VW / 2, vel: 0, rocks: [], score: 0, over: false, overAt: 0, nextSpawn: 0.45 };
+  const steps = Math.min(Math.floor(t / STEP), 60 * 120);
+  for (let i = 0; i < steps; i++) {
+    const now = i * STEP;
+    if (state.over) break;
+    if (now >= state.nextSpawn) {
+      state.rocks.push(spawnAsteroid(rng, now));
+      state.nextSpawn += 0.5;
+    }
+    autopilot(state, STEP);
+    const speedUp = 1 + Math.min(now * 0.03, 0.9);
+    for (const a of state.rocks) {
+      a.y += a.vy * speedUp * STEP;
+      a.rot += a.spin * STEP;
+    }
+    state.rocks = state.rocks.filter((a) => a.y < VH + 70);
+    for (const a of state.rocks) {
+      const dx = a.x - state.shipX, dy = a.y - SHIP_Y;
+      if (dx * dx + dy * dy < (a.r + SHIP_R - 5) * (a.r + SHIP_R - 5)) {
+        state.over = true;
+        state.overAt = now;
+        break;
+      }
+    }
+    state.score = now;
+  }
+  state.score = state.over ? state.overAt : Math.min(t, 120);
+  return state;
+}
+
+// ---- drawing ----
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const params = new URLSearchParams(location.search);
+const fixedT = params.has("t") ? Math.max(0, parseFloat(params.get("t")) || 0) : null;
+const forcedState = params.get("state") || null;
+
+function fitCanvas() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(innerWidth * dpr);
+  canvas.height = Math.round(innerHeight * dpr);
+}
+fitCanvas();
+addEventListener("resize", fitCanvas);
+
+const starRng = mulberry32(SEED + 7);
+const stars = Array.from({ length: 110 }, () => ({
+  x: starRng() * VW, y: starRng() * VH,
+  r: 0.6 + starRng() * 1.7, p: starRng() * Math.PI * 2,
+}));
+
+function drawBackground(t) {
+  const g = ctx.createLinearGradient(0, 0, 0, VH);
+  g.addColorStop(0, "#0a0424");
+  g.addColorStop(0.55, "#070312");
+  g.addColorStop(1, "#160329");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, VW, VH);
+  for (const s of stars) {
+    const tw = 0.35 + 0.65 * Math.abs(Math.sin(t * 1.4 + s.p));
+    ctx.globalAlpha = tw * 0.9;
+    ctx.fillStyle = "#cfe9ff";
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawRock(a) {
+  ctx.save();
+  ctx.translate(a.x, a.y);
+  ctx.rotate(a.rot);
+  ctx.beginPath();
+  for (let i = 0; i < a.verts.length; i++) {
+    const ang = (i / a.verts.length) * Math.PI * 2;
+    const rr = a.r * a.verts[i];
+    if (i === 0) ctx.moveTo(Math.cos(ang) * rr, Math.sin(ang) * rr);
+    else ctx.lineTo(Math.cos(ang) * rr, Math.sin(ang) * rr);
+  }
+  ctx.closePath();
+  ctx.fillStyle = "rgba(20,4,28,0.92)";
+  ctx.fill();
+  ctx.shadowColor = `hsl(${a.hue} 100% 60%)`;
+  ctx.shadowBlur = 18;
+  ctx.strokeStyle = `hsl(${a.hue} 100% 68%)`;
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = `hsl(${a.hue} 100% 78%)`;
+  ctx.beginPath();
+  ctx.arc(-a.r * 0.25, -a.r * 0.2, a.r * 0.14, 0, Math.PI * 2);
+  ctx.arc(a.r * 0.3, a.r * 0.25, a.r * 0.1, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawShip(x, t, vel) {
+  const tilt = Math.max(-0.35, Math.min(0.35, vel * 0.00045));
+  ctx.save();
+  ctx.translate(x, SHIP_Y);
+  ctx.rotate(tilt);
+  const flame = 14 + 8 * Math.abs(Math.sin(t * 31));
+  const fg = ctx.createLinearGradient(0, 10, 0, 10 + flame + 16);
+  fg.addColorStop(0, "#ffe95e");
+  fg.addColorStop(1, "rgba(255,80,180,0)");
+  ctx.fillStyle = fg;
+  ctx.beginPath();
+  ctx.moveTo(-7, 12);
+  ctx.lineTo(0, 12 + flame + 12);
+  ctx.lineTo(7, 12);
+  ctx.closePath();
+  ctx.fill();
+  ctx.shadowColor = "#22e6ff";
+  ctx.shadowBlur = 22;
+  ctx.fillStyle = "#0e2a3a";
+  ctx.strokeStyle = "#22e6ff";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(0, -24);
+  ctx.lineTo(17, 14);
+  ctx.lineTo(0, 7);
+  ctx.lineTo(-17, 14);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = "#aef7ff";
+  ctx.beginPath();
+  ctx.arc(0, -4, 4.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function bigText(text, y, size, color, glow) {
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = `800 ${size}px "Arial Black", Arial, sans-serif`;
+  if (glow) { ctx.shadowColor = glow; ctx.shadowBlur = 26; }
+  ctx.fillStyle = color;
+  ctx.fillText(text, VW / 2, y);
+  ctx.restore();
+}
+
+function smallText(text, y, size, color) {
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = `700 ${size}px Arial, sans-serif`;
+  ctx.fillStyle = color;
+  ctx.fillText(text, VW / 2, y);
+  ctx.restore();
+}
+
+function drawHud(score, t) {
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "800 84px 'Arial Black', Arial, sans-serif";
+  ctx.shadowColor = "#ff2ea6";
+  ctx.shadowBlur = 24;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillText(String(Math.floor(score)), VW / 2, 92);
+  ctx.restore();
+  smallText("SECONDS SURVIVED", 148, 21, "#9beaff");
+  if (Math.floor(t * 2) % 2 === 0) {
+    smallText("◀  STEER  ▶", VH - 42, 20, "rgba(155,234,255,0.65)");
+  }
+}
+
+function drawFrame(t, mode) {
+  const scale = Math.min(canvas.width / VW, canvas.height / VH);
+  const ox = (canvas.width - VW * scale) / 2;
+  const oy = (canvas.height - VH * scale) / 2;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#070312";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+
+  drawBackground(t);
+  if (mode === "title") {
+    bigText("NEON", 300, 118, "#22e6ff", "#22e6ff");
+    bigText("DODGER", 420, 118, "#ff2ea6", "#ff2ea6");
+    smallText("ONE PROMPT. ONE SHIP. ONE LIFE.", 520, 26, "#ffffff");
+    smallText("steer through the falling asteroids", 566, 24, "#9beaff");
+    smallText("your score is survival seconds", 600, 24, "#9beaff");
+    const pulse = 0.6 + 0.4 * Math.abs(Math.sin(t * 3));
+    ctx.save();
+    ctx.globalAlpha = pulse;
+    smallText("TAP OR PRESS SPACE TO FLY", 700, 28, "#ffe95e");
+    ctx.restore();
+    drawShip(VW / 2 + 130 * Math.sin(t * 0.9), t, 60 * Math.cos(t * 0.9));
+    smallText("built by an AI agent from one prompt", VH - 60, 20, "rgba(255,255,255,0.55)");
+    return;
+  }
+  const state = simulate(t);
+  for (const a of state.rocks) drawRock(a);
+  if (mode === "over" || state.over) {
+    drawShip(state.shipX, t, 0);
+    ctx.fillStyle = "rgba(7,3,18,0.62)";
+    ctx.fillRect(0, 0, VW, VH);
+    bigText("SHIP DOWN", 380, 84, "#ff2ea6", "#ff2ea6");
+    bigText(String(Math.floor(state.score)) + "s", 500, 110, "#ffffff", "#22e6ff");
+    smallText("SECONDS SURVIVED", 580, 24, "#9beaff");
+    smallText("TAP TO FLY AGAIN", 680, 28, "#ffe95e");
+    return;
+  }
+  drawShip(state.shipX, t, state.vel);
+  drawHud(state.score, t);
+}
+
+// ---- live play ----
+
+let live = { running: false, startStamp: 0, shipX: VW / 2, vel: 0, keys: {}, pointerX: null, over: false, overAt: 0 };
+let rocks = [];
+let rngLive = mulberry32(SEED);
+let nextSpawn = 0.45;
+let lastStamp = 0;
+
+function liveReset(now) {
+  live = { running: true, startStamp: now, shipX: VW / 2, vel: 0, keys: {}, pointerX: null, over: false, overAt: 0 };
+  rocks = [];
+  rngLive = mulberry32(SEED);
+  nextSpawn = 0.45;
+  lastStamp = now;
+}
+
+function liveStep(now) {
+  const dt = Math.min((now - lastStamp) / 1000, 0.05);
+  lastStamp = now;
+  const t = (now - live.startStamp) / 1000;
+  if (now >= live.startStamp + nextSpawn * 1000) {
+    rocks.push(spawnAsteroid(rngLive, t));
+    nextSpawn += 0.5;
+  }
+  let dir = 0;
+  if (live.keys["ArrowLeft"] || live.keys["a"] || live.keys["A"]) dir -= 1;
+  if (live.keys["ArrowRight"] || live.keys["d"] || live.keys["D"]) dir += 1;
+  if (live.pointerX !== null) {
+    const diff = live.pointerX - live.shipX;
+    live.shipX += Math.max(-470 * dt, Math.min(470 * dt, diff));
+    live.vel = diff * 8;
+  } else if (dir !== 0) {
+    live.shipX += dir * 470 * dt;
+    live.vel = dir * 470;
+  } else {
+    live.vel = 0;
+  }
+  live.shipX = Math.max(24, Math.min(VW - 24, live.shipX));
+  const speedUp = 1 + Math.min(t * 0.03, 0.9);
+  for (const a of rocks) { a.y += a.vy * speedUp * dt; a.rot += a.spin * dt; }
+  rocks = rocks.filter((a) => a.y < VH + 70);
+  for (const a of rocks) {
+    const dx = a.x - live.shipX, dy = a.y - SHIP_Y;
+    if (dx * dx + dy * dy < (a.r + SHIP_R - 5) * (a.r + SHIP_R - 5)) {
+      live.over = true;
+      live.overAt = t;
+      break;
+    }
+  }
+  return t;
+}
+
+function liveFrame(now) {
+  const scale = Math.min(canvas.width / VW, canvas.height / VH);
+  const ox = (canvas.width - VW * scale) / 2;
+  const oy = (canvas.height - VH * scale) / 2;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#070312";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  const t = (now - live.startStamp) / 1000;
+  drawBackground(t);
+  for (const a of rocks) drawRock(a);
+  if (live.over) {
+    drawShip(live.shipX, t, 0);
+    ctx.fillStyle = "rgba(7,3,18,0.62)";
+    ctx.fillRect(0, 0, VW, VH);
+    bigText("SHIP DOWN", 380, 84, "#ff2ea6", "#ff2ea6");
+    bigText(String(Math.floor(live.overAt)) + "s", 500, 110, "#ffffff", "#22e6ff");
+    smallText("SECONDS SURVIVED", 580, 24, "#9beaff");
+    smallText("TAP TO FLY AGAIN", 680, 28, "#ffe95e");
+    return;
+  }
+  drawShip(live.shipX, t, live.vel);
+  drawHud(t, t);
+}
+
+function loop(now) {
+  if (fixedT !== null) return; // deterministic capture mode: one frame only
+  if (live.running) {
+    liveStep(now);
+    liveFrame(now);
+  } else if (live.over) {
+    liveFrame(now);
+  } else {
+    drawFrame(performance.now() / 1000, "title");
+  }
+  requestAnimationFrame(loop);
+}
+
+addEventListener("keydown", (e) => {
+  if (["ArrowLeft", "ArrowRight", " "].includes(e.key)) e.preventDefault();
+  if (e.key === " " && !live.running) { liveReset(performance.now()); return; }
+  live.keys[e.key] = true;
+});
+addEventListener("keyup", (e) => { live.keys[e.key] = false; });
+canvas.addEventListener("pointerdown", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const scale = Math.min(canvas.width / VW, canvas.height / VH);
+  const ox = (canvas.width - VW * scale) / 2;
+  const x = ((e.clientX - rect.left) * (canvas.width / rect.width) - ox) / scale;
+  if (!live.running) { liveReset(performance.now()); return; }
+  live.pointerX = Math.max(24, Math.min(VW - 24, x));
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (live.pointerX === null) return;
+  const rect = canvas.getBoundingClientRect();
+  const scale = Math.min(canvas.width / VW, canvas.height / VH);
+  const ox = (canvas.width - VW * scale) / 2;
+  const x = ((e.clientX - rect.left) * (canvas.width / rect.width) - ox) / scale;
+  live.pointerX = Math.max(24, Math.min(VW - 24, x));
+});
+addEventListener("pointerup", () => { live.pointerX = null; });
+
+if (fixedT !== null) {
+  drawFrame(fixedT, forcedState || "play");
+} else if (forcedState) {
+  drawFrame(performance.now() / 1000, forcedState);
+  requestAnimationFrame(loop);
+} else {
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
